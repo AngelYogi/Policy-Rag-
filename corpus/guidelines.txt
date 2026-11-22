@@ -1,0 +1,14 @@
+INFORMATION SECURITY GUIDELINES
+
+OVERVIEW
+
+These guidelines establish minimum security standards.
+
+ACCESS CONTROL
+
+All systems must require multi-factor authentication.
+Passwords must be at least 16 characters long.
+
+INCIDENT RESPONSE
+
+Report any suspected breach within 24 hours.

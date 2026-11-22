@@ -1,0 +1,57 @@
+# .gitignore for Enterprise RAG Quality Engineering Platform
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Environment / secrets ---
+.env
+
+# --- ChromaDB local store ---
+data/vectorstore/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- macOS ---
+.DS_Store
+
+# --- Testing & coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# --- Mypy ---
+.mypy_cache/
+
+# --- Ruff ---
+.ruff_cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb
+
+# --- Logs ---
+logs/
+*.log
+
+# --- Reports (generated artefacts — keep structure, ignore content) ---
+reports/*.html
+reports/*.pdf
+reports/*.png
+reports/*.csv

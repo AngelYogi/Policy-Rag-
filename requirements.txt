@@ -1,0 +1,57 @@
+# ============================================================
+# Enterprise RAG Quality Engineering Platform
+# requirements.txt  –  Python 3.11+
+# ============================================================
+
+# --- Web framework & API ---
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12        # file uploads
+
+# --- Frontend ---
+streamlit==1.40.2
+
+# --- Vector database ---
+chromadb==0.5.23
+
+# --- Embeddings ---
+sentence-transformers==3.3.1
+
+# --- LLM provider ---
+openai==1.57.0
+
+# --- PDF / document parsing ---
+PyMuPDF==1.25.0                 # fitz
+
+# --- Data processing ---
+pandas==2.2.3
+numpy==2.1.3
+
+# --- RAG evaluation ---
+ragas==0.2.6
+datasets==3.1.0                 # required by ragas
+
+# --- Testing ---
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+httpx==0.28.0                   # async test client for FastAPI
+
+# --- Configuration & utilities ---
+python-dotenv==1.0.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+pyyaml==6.0.2
+tenacity==9.0.0                 # retry logic for LLM calls
+
+# --- Visualizations (reporting) ---
+matplotlib==3.9.3
+seaborn==0.13.2
+plotly==5.24.1
+
+# --- Logging ---
+loguru==0.7.3
+
+# --- Code quality (dev only) ---
+ruff==0.8.3
+mypy==1.13.0
