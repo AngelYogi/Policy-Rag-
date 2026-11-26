@@ -13,20 +13,23 @@ Text is split hierarchically through a prioritised list of separators:
   4. Space           (word boundary)
   5. Empty string    (character, last resort)
 
-At each level the algorithm tries to merge adjacent small pieces into chunks
-≤ chunk_size.  If a piece is itself larger than chunk_size it is split
-further using the next separator in the list.
+At each level, if a piece is longer than chunk_size, it is recursively
+subdivided using the next separator in the hierarchy.  The resulting atomic
+pieces are then merged together using the appropriate separator up to
+chunk_size, with configurable overlap maintained between consecutive chunks.
 
-This preserves semantic cohesion as long as possible — paragraphs are kept
-intact whenever they fit, then lines, then sentences, before resorting to
-word or character splits.
-
-Overlap is applied between consecutive chunks by prepending the tail of the
-previous chunk to the start of the next.
+This preserves semantic boundaries as long as possible:
+- Paragraphs are kept intact whenever they fit.
+- Lines, sentences, words, and characters are split only when necessary.
+- Natural whitespace and formatting are preserved without smashing words together.
 
 Metadata preserved
 ------------------
-Same as FixedSizeChunker (section attribution via character offset index).
+- document_id, filename, file_type
+- section_id, section_heading
+- page_numbers (for PDFs)
+- chunking_strategy, chunk_size_config, overlap_config
+- exact start_char and end_char in document.content
 """
 
 from __future__ import annotations
@@ -44,101 +47,103 @@ from src.ingestion.models import FileType, ParsedDocument, Section
 _SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
 
 
-def _split_text_recursive(
+def _split_text_hierarchical(
     text: str,
-    chunk_size: int,
     separators: List[str],
+    chunk_size: int,
+) -> Tuple[str, List[str]]:
+    """
+    Split text using the coarsest separator that occurs in `text`,
+    recursing on any piece that exceeds `chunk_size`.
+
+    Returns
+    -------
+    (primary_separator, list_of_pieces)
+    """
+    if not text:
+        return "", []
+
+    sep = separators[-1]
+    new_seps = []
+    for i, s in enumerate(separators):
+        if s == "":
+            sep = s
+            break
+        if s in text:
+            sep = s
+            new_seps = separators[i + 1 :]
+            break
+
+    if sep == "":
+        splits = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    else:
+        splits = text.split(sep)
+
+    good_splits: List[str] = []
+    for s in splits:
+        if len(s) <= chunk_size:
+            good_splits.append(s)
+        else:
+            if new_seps:
+                _child_sep, child_splits = _split_text_hierarchical(s, new_seps, chunk_size)
+                good_splits.extend(child_splits)
+            else:
+                good_splits.extend([s[i : i + chunk_size] for i in range(0, len(s), chunk_size)])
+
+    return sep, good_splits
+
+
+def _merge_splits_with_overlap(
+    splits: List[str],
+    separator: str,
+    chunk_size: int,
+    overlap: int,
 ) -> List[str]:
     """
-    Recursively split ``text`` into pieces no longer than ``chunk_size``
-    using the first applicable separator in ``separators``.
-
-    Returns a flat list of text pieces (no overlap applied yet).
+    Merge atomic splits into chunks up to `chunk_size`, maintaining `overlap`.
     """
-    if len(text) <= chunk_size:
-        return [text]
-
-    if not separators:
-        # Last resort: hard character split
-        return [text[i: i + chunk_size] for i in range(0, len(text), chunk_size)]
-
-    separator = separators[0]
-    remaining = separators[1:]
-
-    if separator == "":
-        # Character-level split
-        return [text[i: i + chunk_size] for i in range(0, len(text), chunk_size)]
-
-    parts = text.split(separator)
-
-    # Merge small parts together and recurse on oversized parts
-    merged: List[str] = []
-    current = ""
-
-    for part in parts:
-        candidate = (current + separator + part).lstrip(separator) if current else part
-        if len(candidate) <= chunk_size:
-            current = candidate
-        else:
-            if current:
-                merged.append(current)
-            if len(part) > chunk_size:
-                # This single part is too big — go deeper
-                merged.extend(_split_text_recursive(part, chunk_size, remaining))
-                current = ""
-            else:
-                current = part
-
-    if current:
-        merged.append(current)
-
-    return merged
-
-
-def _apply_overlap(pieces: List[str], overlap: int) -> List[Tuple[str, int, int]]:
-    """
-    Given a flat list of text pieces (no overlap), produce
-    ``(content, start_char, end_char)`` tuples with overlap applied.
-
-    ``start_char`` / ``end_char`` are offsets into the reconstructed
-    original text (pieces joined without separator — conservative estimate).
-
-    The overlap is taken from the **tail** of the previous chunk and
-    prepended to the current chunk content.
-    """
-    if not pieces:
+    if not splits:
         return []
 
-    result: List[Tuple[str, int, int]] = []
-    # Build cumulative character positions in the original text
-    # (treating pieces as contiguous)
-    offsets: List[int] = []
-    pos = 0
-    for p in pieces:
-        offsets.append(pos)
-        pos += len(p)
+    chunks: List[str] = []
+    curr: List[str] = []
+    curr_len = 0
 
-    for i, piece in enumerate(pieces):
-        if i == 0 or overlap == 0:
-            content = piece
-            start = offsets[i]
+    for s in splits:
+        s_len = len(s)
+        join_len = len(separator) if curr else 0
+
+        if curr_len + join_len + s_len <= chunk_size:
+            curr.append(s)
+            curr_len += join_len + s_len
         else:
-            # Prepend tail of previous chunk
-            prev = pieces[i - 1]
-            tail = prev[-overlap:] if len(prev) >= overlap else prev
-            content = tail + piece
-            start = max(0, offsets[i] - len(tail))
+            if curr:
+                chunk_str = separator.join(curr)
+                if chunk_str.strip():
+                    chunks.append(chunk_str)
+                # Overlap: keep trailing pieces from curr that fit within overlap
+                while curr and (
+                    curr_len > overlap
+                    or (curr_len + join_len + s_len > chunk_size and len(curr) > 1)
+                ):
+                    popped = curr.pop(0)
+                    curr_len -= len(popped) + (len(separator) if curr else 0)
 
-        end = offsets[i] + len(piece)
-        result.append((content, start, end))
+            curr.append(s)
+            curr_len += s_len + (len(separator) if len(curr) > 1 else 0)
 
-    return result
+    if curr:
+        chunk_str = separator.join(curr)
+        if chunk_str.strip():
+            chunks.append(chunk_str)
+
+    return chunks
 
 
 def _build_section_index(
     document: ParsedDocument,
 ) -> List[Tuple[int, int, Section]]:
-    """Identical to the one in fixed_size.py — duplicated to keep modules independent."""
+    """Build a list of (start_char, end_char, section) tuples."""
     index: List[Tuple[int, int, Section]] = []
     search_start = 0
     for section in document.sections:
@@ -191,7 +196,7 @@ class RecursiveChunker(BaseChunker):
     """
     Recursive character chunker that respects semantic boundaries.
 
-    Tries paragraph → line → sentence → word → character splits in
+    Tries paragraph -> line -> sentence -> word -> character splits in
     priority order.
     """
 
@@ -213,7 +218,7 @@ class RecursiveChunker(BaseChunker):
         List[Chunk]
         """
         text = document.content
-        if not text.strip():
+        if not text or not text.strip():
             logger.debug(
                 "RecursiveChunker: document '{}' is empty, returning no chunks.",
                 document.filename,
@@ -221,23 +226,32 @@ class RecursiveChunker(BaseChunker):
             return []
 
         section_index = _build_section_index(document)
-        raw_pieces = _split_text_recursive(
-            text, self.config.chunk_size, _SEPARATORS
+        sep, splits = _split_text_hierarchical(text, _SEPARATORS, self.config.chunk_size)
+        raw_chunks = _merge_splits_with_overlap(
+            splits, sep, self.config.chunk_size, self.config.overlap
         )
-        # Discard near-empty pieces before applying overlap
-        raw_pieces = [p for p in raw_pieces if p.strip()]
 
-        overlapped = _apply_overlap(raw_pieces, self.config.overlap)
         chunks: List[Chunk] = []
+        search_pos = 0
 
-        for idx, (content, start, end) in enumerate(overlapped):
-            if len(content.strip()) < self.config.min_chunk_length:
+        for idx, content in enumerate(raw_chunks):
+            if not content.strip():
                 continue
 
+            # Find exact character offsets in original content
+            found_pos = text.find(content, search_pos)
+            if found_pos != -1:
+                start = found_pos
+                end = found_pos + len(content)
+                search_pos = max(0, start + 1)
+            else:
+                # Fallback in case of subtle substring alignment
+                start = search_pos
+                end = min(start + len(content), len(text))
+                search_pos = end
+
             section_id, section_heading = _resolve_section(section_index, start)
-            page_numbers = _resolve_page_numbers(
-                document, section_index, start, end
-            )
+            page_numbers = _resolve_page_numbers(document, section_index, start, end)
 
             chunk_id = _make_chunk_id(
                 document_id=document.document_id,
@@ -264,13 +278,13 @@ class RecursiveChunker(BaseChunker):
                     metadata={
                         **self._base_metadata(),
                         "separators": _SEPARATORS,
+                        "primary_separator": sep,
                     },
                 )
             )
 
         logger.info(
-            "RecursiveChunker: '{}' → {} chunk(s) "
-            "(size={}, overlap={})",
+            "RecursiveChunker: '{}' -> {} chunk(s) (size={}, overlap={})",
             document.filename,
             len(chunks),
             self.config.chunk_size,

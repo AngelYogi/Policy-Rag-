@@ -130,6 +130,11 @@ class Chunk:
         """True when the chunk carries an explicit section ID."""
         return self.section_id is not None
 
+    @property
+    def page_number(self) -> Optional[int]:
+        """First page number or None when page references are unavailable."""
+        return self.page_numbers[0] if self.page_numbers else None
+
     def __repr__(self) -> str:
         return (
             f"Chunk(id={self.chunk_id!r}, "

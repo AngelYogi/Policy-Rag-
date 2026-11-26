@@ -7,22 +7,20 @@ Algorithm
 ---------
 Each ``Section`` from Stage 2 is treated as an independent unit:
 
-1. If the section content is ≤ ``chunk_size``, it becomes a single chunk.
+1. If the section content is <= ``chunk_size``, it becomes a single chunk.
 2. If the section content exceeds ``chunk_size``, it is split further using
-   the recursive strategy (same separator hierarchy as RecursiveChunker) so
-   that semantic boundaries are still respected within oversized sections.
+   the recursive strategy (hierarchical separators) so semantic boundaries
+   are preserved within oversized sections.
 
 Content from one section is NEVER merged with content from another section.
-The section heading and section_id are preserved on every chunk produced
-from that section.
+The section heading, section_id, and page reference are preserved on every
+chunk produced from that section.
 
 Page numbers
 ------------
-Every chunk inherits the ``page_number`` of its parent section.  When
-overflow splitting creates multiple chunks from one section they all share
-that same page number (the page where the section begins).  This is an
-approximation: PyMuPDF sections are per-page so a section never spans
-multiple pages with this parser.
+Every chunk inherits the ``page_number`` of its parent section. When
+overflow splitting creates multiple chunks from one section, they all share
+that section's page reference.
 
 Metadata preserved
 ------------------
@@ -35,14 +33,18 @@ Metadata preserved
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from loguru import logger
 
 from src.chunking.base import BaseChunker
 from src.chunking.config import ChunkingConfig
 from src.chunking.models import Chunk, _make_chunk_id
-from src.chunking.recursive import _apply_overlap, _split_text_recursive, _SEPARATORS
+from src.chunking.recursive import (
+    _SEPARATORS,
+    _merge_splits_with_overlap,
+    _split_text_hierarchical,
+)
 from src.ingestion.models import ParsedDocument, Section
 
 
@@ -51,7 +53,7 @@ class SectionBasedChunker(BaseChunker):
     Section-aware chunker — each section is chunked independently.
 
     Sections that exceed ``chunk_size`` are split with the recursive
-    strategy so word and sentence boundaries are still respected.
+    strategy so word, sentence, and paragraph boundaries are respected.
     """
 
     @property
@@ -70,7 +72,7 @@ class SectionBasedChunker(BaseChunker):
         Returns
         -------
         List[Chunk]
-            Chunks in document order.  Empty for empty documents.
+            Chunks in document order. Empty for empty documents.
         """
         if not document.content.strip():
             logger.debug(
@@ -80,7 +82,6 @@ class SectionBasedChunker(BaseChunker):
             return []
 
         if not document.sections:
-            # No sections from the parser — treat the full content as one section
             return self._chunk_fallback(document)
 
         chunks: List[Chunk] = []
@@ -97,8 +98,7 @@ class SectionBasedChunker(BaseChunker):
             chunks.extend(section_chunks)
 
         logger.info(
-            "SectionBasedChunker: '{}' → {} chunk(s) from {} section(s) "
-            "(size={}, overlap={})",
+            "SectionBasedChunker: '{}' -> {} chunk(s) from {} section(s) (size={}, overlap={})",
             document.filename,
             len(chunks),
             len(document.sections),
@@ -118,11 +118,7 @@ class SectionBasedChunker(BaseChunker):
         sec_idx: int,
         global_index_start: int,
     ) -> List[Chunk]:
-        """
-        Chunk a single section and return its chunks.
-
-        Empty sections produce no chunks.
-        """
+        """Chunk a single section independently."""
         text = section.content.strip()
         if not text:
             return []
@@ -132,22 +128,31 @@ class SectionBasedChunker(BaseChunker):
         )
 
         if len(text) <= self.config.chunk_size:
-            # Section fits in a single chunk
-            pieces_with_offsets: List[Tuple[str, int, int]] = [(text, 0, len(text))]
+            raw_pieces = [text]
         else:
-            # Split using recursive strategy
-            raw_pieces = _split_text_recursive(
-                text, self.config.chunk_size, _SEPARATORS
+            sep, splits = _split_text_hierarchical(text, _SEPARATORS, self.config.chunk_size)
+            raw_pieces = _merge_splits_with_overlap(
+                splits, sep, self.config.chunk_size, self.config.overlap
             )
-            raw_pieces = [p for p in raw_pieces if p.strip()]
-            pieces_with_offsets = _apply_overlap(raw_pieces, self.config.overlap)
 
         result: List[Chunk] = []
-        for local_idx, (content, start, end) in enumerate(pieces_with_offsets):
-            if len(content.strip()) < self.config.min_chunk_length:
+        search_pos = 0
+
+        for local_idx, content in enumerate(raw_pieces):
+            if not content.strip():
                 continue
 
-            global_idx = global_index_start + local_idx
+            found_pos = text.find(content, search_pos)
+            if found_pos != -1:
+                start = found_pos
+                end = found_pos + len(content)
+                search_pos = max(0, start + 1)
+            else:
+                start = search_pos
+                end = min(start + len(content), len(text))
+                search_pos = end
+
+            global_idx = global_index_start + len(result)
             chunk_id = _make_chunk_id(
                 document_id=document.document_id,
                 section_id=section.section_id,
@@ -181,19 +186,30 @@ class SectionBasedChunker(BaseChunker):
         return result
 
     def _chunk_fallback(self, document: ParsedDocument) -> List[Chunk]:
-        """
-        When a document has no sections, treat the full content as one
-        anonymous section and apply recursive splitting.
-        """
+        """Fallback when document has no explicit sections."""
         text = document.content.strip()
-        raw_pieces = _split_text_recursive(text, self.config.chunk_size, _SEPARATORS)
-        raw_pieces = [p for p in raw_pieces if p.strip()]
-        overlapped = _apply_overlap(raw_pieces, self.config.overlap)
+        sep, splits = _split_text_hierarchical(text, _SEPARATORS, self.config.chunk_size)
+        raw_pieces = _merge_splits_with_overlap(
+            splits, sep, self.config.chunk_size, self.config.overlap
+        )
 
         chunks: List[Chunk] = []
-        for idx, (content, start, end) in enumerate(overlapped):
-            if len(content.strip()) < self.config.min_chunk_length:
+        search_pos = 0
+
+        for idx, content in enumerate(raw_pieces):
+            if not content.strip():
                 continue
+
+            found_pos = text.find(content, search_pos)
+            if found_pos != -1:
+                start = found_pos
+                end = found_pos + len(content)
+                search_pos = max(0, start + 1)
+            else:
+                start = search_pos
+                end = min(start + len(content), len(text))
+                search_pos = end
+
             chunk_id = _make_chunk_id(
                 document_id=document.document_id,
                 section_id=None,
@@ -202,6 +218,7 @@ class SectionBasedChunker(BaseChunker):
                 overlap=self.config.overlap,
                 chunk_index=idx,
             )
+
             chunks.append(
                 Chunk(
                     chunk_id=chunk_id,
@@ -224,7 +241,7 @@ class SectionBasedChunker(BaseChunker):
             )
 
         logger.info(
-            "SectionBasedChunker (fallback): '{}' → {} chunk(s)",
+            "SectionBasedChunker (fallback): '{}' -> {} chunk(s)",
             document.filename,
             len(chunks),
         )

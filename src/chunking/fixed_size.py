@@ -173,7 +173,7 @@ class FixedSizeChunker(BaseChunker):
 
             chunk_text = text[pos:end]
 
-            if len(chunk_text.strip()) >= self.config.min_chunk_length:
+            if chunk_text.strip():
                 section_id, section_heading = _resolve_section(
                     section_index, pos
                 )
@@ -211,10 +211,18 @@ class FixedSizeChunker(BaseChunker):
                 )
                 global_index += 1
 
-            # Move forward by step (chunk_size - overlap)
-            pos += step
-            if step <= 0:
-                break  # guard against zero-step infinite loop
+            if end >= len(text):
+                break
+
+            # Next position guarantees overlap and that pos advances monotonically
+            next_pos = max(pos + 1, end - self.config.overlap)
+            if next_pos < end:
+                snapped_start = _find_word_boundary(text, next_pos, direction=1)
+                if snapped_start < end and snapped_start > pos:
+                    next_pos = snapped_start
+                    if next_pos < len(text) and text[next_pos] == " ":
+                        next_pos += 1
+            pos = next_pos
 
         logger.info(
             "FixedSizeChunker: '{}' → {} chunk(s) "
